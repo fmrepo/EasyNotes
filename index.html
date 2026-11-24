@@ -28,7 +28,20 @@
     if (window.__ok) return; var r = e.reason;
     fail('Unhandled promise error: ' + (r && r.message || r) + (r && r.stack ? '\n\n' + String(r.stack).split('\n').slice(0, 6).join('\n') : ''));
   });
-  setTimeout(function () { if (!window.__ok) fail('Startup is taking longer than expected (8 seconds).'); }, 8000);
+  window.__clear = function () { var x = document.getElementById('fatal'); if (x) x.remove(); x = document.getElementById('slowbar'); if (x) x.remove(); };
+  setTimeout(function () {
+    if (window.__ok || document.getElementById('fatal') || document.getElementById('slowbar')) return;
+    function build() {
+      var b = document.createElement('div'); b.id = 'slowbar';
+      b.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:99;background:#2a2a30;color:#dcddde;padding:12px 16px;font:14px/1.5 sans-serif;display:flex;gap:12px;align-items:center;flex-wrap:wrap;border-top:1px solid #38383f';
+      b.innerHTML = '<span style="flex:1;min-width:240px">Still starting. Opening a large or cloud-synced folder (for example OneDrive) can be slow.</span>';
+      function btn(label, fn, primary) { var x = document.createElement('button'); x.textContent = label; x.onclick = fn; x.style.cssText = 'padding:6px 12px;border:0;border-radius:6px;font:inherit;cursor:pointer;color:#fff;background:' + (primary ? '#a38bff' : '#3a3a42'); b.appendChild(x); }
+      btn('Use browser storage instead', function () { try { localStorage.setItem('easynotes:mode', 'local'); } catch (e) {} location.reload(); }, true);
+      btn('Keep waiting', function () { b.remove(); });
+      document.body.appendChild(b);
+    }
+    if (document.body) build(); else document.addEventListener('DOMContentLoaded', build);
+  }, 8000);
 })();
 </script>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%237c5cff'/><path fill='%23fff' d='M20 16h26v8H28v4h12v8H28v4h18v8H20z'/></svg>">
@@ -286,14 +299,15 @@ class LocalBackend {
 }
 class FSBackend {
   constructor(root) { this.root = root; this.name = root.name; this.kind = 'fs'; }
-  async load() { const out = []; this.assets = []; await this._walk(this.root, '', out); return out; }
+  async list() { const out = []; this.assets = []; await this._walk(this.root, '', out); return out; }
+  async read(handle) { const f = await handle.getFile(); return { content: await f.text(), mtime: f.lastModified }; }
   assetList() { return this.assets || []; }
   async _walk(dir, prefix, out) {
     for await (const [name, handle] of dir.entries()) {
       if (name.startsWith('.') || name === 'node_modules') continue;
       if (handle.kind === 'directory') await this._walk(handle, prefix + name + '/', out);
       else if (IMG_EXT.test(name)) (this.assets = this.assets || []).push(prefix + name);
-      else if (/\.md$/i.test(name)) { const f = await handle.getFile(); out.push({ path: prefix + name, content: await f.text(), mtime: f.lastModified }); }
+      else if (/\.md$/i.test(name)) out.push({ path: prefix + name, handle });
     }
   }
   async _dir(parts, create) { let d = this.root; for (const p of parts) d = await d.getDirectoryHandle(p, { create }); return d; }
@@ -571,6 +585,8 @@ async function deleteNote(path) {
   normalizePanes(); reindex(); renderAll();
 }
 async function renameNote(path, newName, exact, quiet) {
+  if (S.loadAll) await S.loadAll;
+  if (S.notes.get(path) && S.notes.get(path).failed) return toast('That file could not be read, so it cannot be renamed yet');
   newName = cleanPath(newName).replace(/\.md$/i, '');
   if (!newName) return;
   // keep folder if user typed only a name
@@ -1157,7 +1173,7 @@ function doSearch() {
   }
   results.sort((a, b) => b.score - a.score || a.p.localeCompare(b.p));
   const hl = s => { let r = esc(s); for (const t of terms) if (t) r = r.replace(new RegExp(esc(t).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), m => `<mark>${m}</mark>`); return r; };
-  box.replaceChildren(h('div', { class: 'muted' }, `${results.length} result${results.length === 1 ? '' : 's'}`), ...results.slice(0, 100).map(r =>
+  box.replaceChildren(h('div', { class: 'muted' }, `${results.length} result${results.length === 1 ? '' : 's'}${S.progress ? ' (still reading notes…)' : ''}`), ...results.slice(0, 100).map(r =>
     h('div', { class: 'res', onclick: e => e.altKey ? openInOther(r.p) : openNote(r.p) }, h('div', { class: 'rt' }, base(r.p)), h('div', { class: 'rp' }, r.p), ...r.snips.map(s => h('div', { class: 'sn', html: hl(s) })))));
 }
 function renderRight() {
@@ -1196,7 +1212,7 @@ function setStatus(msg) { S.saveMsg = msg; renderStatus(); }
 function renderStatus() {
   const n = activeNote();
   const words = n ? (n.content.trim().match(/\S+/g) || []).length : 0;
-  $('#status').replaceChildren(h('span', {}, `${S.backend ? S.backend.name : ''}${S.backend && S.backend.kind === 'fs' ? ' (folder)' : ''}`), h('span', {}, `${S.notes.size} notes`), h('span', { class: 'sp' }), h('span', {}, S.saveMsg || ''), ...(n ? [h('span', {}, `${words} words · ${n.content.length} chars`)] : []));
+  $('#status').replaceChildren(h('span', {}, `${S.backend ? S.backend.name : ''}${S.backend && S.backend.kind === 'fs' ? ' (folder)' : ''}`), h('span', {}, `${S.notes.size} notes`), ...(S.progress ? [h('span', {}, `Reading notes ${S.progress.done}/${S.progress.total}…`)] : []), h('span', { class: 'sp' }), h('span', {}, S.saveMsg || ''), ...(n ? [h('span', {}, `${words} words · ${n.content.length} chars`)] : []));
 }
 
 function paneTitle(t) { return t.type === 'graph' ? '🕸 Graph' : base(t.path); }
@@ -1239,6 +1255,8 @@ function renderPanes(focusEditor) {
     } else {
       const n = S.notes.get(t.path);
       if (!n) { el.append(h('div', { class: 'empty' }, 'Note not found')); return el; }
+      if (n.loading) { el.append(h('div', { class: 'empty' }, 'Loading note…')); readNote(n).then(() => renderAll()); return el; }
+      if (n.failed) { el.append(h('div', { class: 'empty' }, 'This file could not be read. It may still be syncing.', h('br'), h('button', { class: 'btn', onclick: () => { n.failed = false; n.loading = true; renderAll(); } }, 'Try again'))); return el; }
       const title = h('input', { class: 'title', value: base(n.path), spellcheck: 'false', onkeydown: e => { if (e.key === 'Enter') e.target.blur(); if (e.key === 'Escape') { e.target.value = base(n.path); e.target.blur(); } }, onchange: e => renameNote(n.path, e.target.value) });
       const modeBtn = (m, label) => h('button', { class: t.mode === m ? 'on' : '', onclick: () => { t.mode = m; renderAll(true); } }, label);
       el.append(h('div', { class: 'toolbar' }, title, h('span', { class: 'path' }, n.path.includes('/') ? n.path.replace(/\/[^\/]*$/, '') : ''), h('div', { class: 'seg' }, modeBtn('rich', 'Rich'), modeBtn('source', 'Source'), modeBtn('split', 'Split'), modeBtn('preview', 'Preview'))));
@@ -1501,9 +1519,30 @@ const SEED = {
   'Templates/Daily Note.md': `# {{date}}\n\n## Tasks\n- [ ] \n\n## Notes\n\n`,
   'Templates/Meeting.md': `# {{title}}\n\n**Date:** {{date}} {{time}}\n**Attendees:** \n\n## Agenda\n\n## Notes\n\n## Action items\n- [ ] \n`,
 };
+async function pool(items, n, fn) { let i = 0; await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => { while (i < items.length) await fn(items[i++]); })); }
+function readNote(n) {
+  if (!n.loading) return Promise.resolve();
+  if (!n._p) n._p = withTimeout(S.backend.read(n._h).catch(() => null), 20000, null).then(r => { if (r) { n.content = r.content; n.mtime = r.mtime; } else n.failed = true; n.loading = false; n._p = null; });
+  return n._p;
+}
+const loadTick = debounce(() => { reindex(); if (S.leftPanel === 'files') renderLeft(); renderRight(); renderStatus(); }, 500);
+async function backgroundLoad() {
+  const pending = [...S.notes.values()].filter(n => n.loading); let done = 0;
+  S.progress = { done: 0, total: pending.length }; renderStatus();
+  await pool(pending, 6, async n => { await readNote(n); S.progress.done = ++done; loadTick(); });
+  S.progress = null; reindex(); renderLeft(); renderRight(); renderStatus(); S.views.forEach(v => v.refresh());
+  const bad = pending.filter(n => n.failed).length; if (bad) toast(`${bad} note${bad === 1 ? '' : 's'} could not be read (still syncing?)`);
+}
 async function loadVault(backend, seed) {
   await flushAll();
-  S.backend = backend; S.notes = new Map();
+  S.backend = backend; S.notes = new Map(); S.progress = null; S.loadAll = null;
+  if (backend.kind === 'fs') {
+    const entries = await withTimeout(backend.list(), 20000, null);
+    if (!entries) throw new Error('Reading the folder took too long. If it is in OneDrive, try again once it has synced.');
+    for (const e of entries) S.notes.set(e.path, { path: e.path, content: '', mtime: 0, dirty: false, loading: true, _h: e.handle });
+    S.assets = new Set(backend.assetList()); assetUrls.clear(); reindex();
+    S.loadAll = backgroundLoad(); return true;
+  }
   let files = await backend.load();
   if (files === null) { files = []; for (const [p, c] of Object.entries(SEED)) { files.push({ path: p, content: c, mtime: 0 }); } for (const f of files) await backend.write(f.path, f.content); }
   for (const f of files) S.notes.set(f.path, { ...f, dirty: false });
@@ -1526,21 +1565,30 @@ async function pickFolder() {
     toast(`Opened ${dir.name} (${S.notes.size} notes)`);
   } catch (e) { if (e.name !== 'AbortError') toast('Could not open folder: ' + e.message); }
 }
+let lastReload = 0;
 async function reloadVault(manual) {
   if (!S.backend || S.backend.kind !== 'fs') { if (manual) toast('Only folder vaults can be reloaded'); return; }
+  if (!manual && (Date.now() - lastReload < 30000 || S.progress)) return;
+  lastReload = Date.now();
   try {
-    const files = await S.backend.load(); const seen = new Set(); S.assets = new Set(S.backend.assetList());
-    for (const f of files) {
-      seen.add(f.path); const n = S.notes.get(f.path);
-      if (!n) S.notes.set(f.path, { ...f, dirty: false });
-      else if (!n.dirty && f.mtime !== n.mtime && f.content !== n.content) { n.content = f.content; n.mtime = f.mtime; }
-    }
-    for (const p of [...S.notes.keys()]) if (!seen.has(p) && !S.notes.get(p).dirty) S.notes.delete(p);
-    for (const pane of S.panes) pane.tabs = pane.tabs.filter(t => t.type !== 'note' || S.notes.has(t.path));
-    reindex(); renderAll(); if (manual) toast('Vault reloaded');
+    const entries = await withTimeout(S.backend.list(), 20000, null);
+    if (!entries) { if (manual) toast('Reload timed out'); return; }
+    S.assets = new Set(S.backend.assetList()); const seen = new Set(); let structural = false, changed = false;
+    await pool(entries, 6, async e => {
+      seen.add(e.path); const n = S.notes.get(e.path);
+      if (!n) { const nn = { path: e.path, content: '', mtime: 0, dirty: false, loading: true, _h: e.handle }; S.notes.set(e.path, nn); structural = true; await readNote(nn); return; }
+      n._h = e.handle; if (n.dirty || n.loading) return;
+      try { const f = await withTimeout(e.handle.getFile(), 15000, null); if (f && f.lastModified !== n.mtime) { const t = await f.text(); if (t !== n.content) { n.content = t; changed = true; } n.mtime = f.lastModified; } } catch {}
+    });
+    for (const p of [...S.notes.keys()]) if (!seen.has(p) && !S.notes.get(p).dirty) { S.notes.delete(p); structural = true; }
+    for (const pane of S.panes) { const before = pane.tabs.length; pane.tabs = pane.tabs.filter(t => t.type !== 'note' || S.notes.has(t.path)); if (pane.tabs.length !== before) structural = true; }
+    reindex();
+    if (structural || manual) renderAll(); else if (changed) { renderLeft(); renderRight(); renderStatus(); S.views.forEach(v => v.refresh()); }
+    if (manual) toast('Vault reloaded');
   } catch (e) { if (manual) toast('Reload failed: ' + e.message); }
 }
-function exportVault() {
+async function exportVault() {
+  if (S.loadAll) await S.loadAll;
   const o = {}; for (const [p, n] of S.notes) o[p] = n.content;
   const a = h('a', { href: URL.createObjectURL(new Blob([JSON.stringify(o, null, 2)], { type: 'application/json' })), download: `easynotes-${dateStr()}.json` });
   document.body.append(a); a.click(); a.remove();
@@ -1555,7 +1603,7 @@ async function importFiles(files, folder = '') {
   renderAll(); toast(`Imported ${c} note${c === 1 ? '' : 's'}`);
 }
 function startScreen(savedDir) {
-  S.booted = true; window.__ok = true;
+  S.booted = true; window.__ok = true; if (window.__clear) window.__clear();
   return new Promise(res => {
     const { close, o } = overlay(h('div', { class: 'modal' }, h('h3', {}, 'Welcome to EasyNotes'), h('div', { class: 'pad' },
       h('p', {}, savedDir ? 'Pick up where you left off (press Enter):' : 'Choose where your notes live:'),
@@ -1600,19 +1648,23 @@ async function bootMain() {
   let backend = null; const mode = LS.get('easynotes:mode');
   const saved = FS_OK ? await withTimeout(kvGet('dir'), 2000, null) : null;
   if (mode === 'fs' && saved) {
-    try { if ((await saved.queryPermission({ mode: 'readwrite' })) === 'granted') backend = new FSBackend(saved); } catch {}
+    try { if ((await withTimeout(saved.queryPermission({ mode: 'readwrite' }), 3000, 'timeout')) === 'granted') backend = new FSBackend(saved); } catch {}
     if (!backend) backend = await startScreen(saved);
   } else if (mode === 'local') backend = new LocalBackend();
   else backend = await startScreen(saved);
   LS.set('easynotes:mode', backend.kind);
-  try { await loadVault(backend); } catch (e) { toast('Failed to open vault: ' + e.message); await loadVault(new LocalBackend()); }
+  try { await loadVault(backend); } catch (e) {
+    toast('Could not open your folder: ' + (e && e.message || e));
+    const b2 = await startScreen(saved); LS.set('easynotes:mode', b2.kind);
+    try { await loadVault(b2); } catch { await loadVault(new LocalBackend()); }
+  }
   // restore tabs
   if (ui.panes && ui.panes.length) {
     S.panes = ui.panes.map(p => ({ active: p.active || 0, tabs: p.tabs.filter(t => t.type === 'graph' || S.notes.has(t.path)).map(t => (t.mode === 'edit' ? { ...t, mode: 'source' } : t)) })).slice(0, 2);
     S.activePane = ui.activePane || 0;
   }
   if (!S.panes.some(p => p.tabs.length)) { const first = S.notes.has('Welcome.md') ? 'Welcome.md' : [...S.notes.keys()].sort()[0]; S.panes = [{ tabs: first ? [{ type: 'note', path: first, mode: 'rich' }] : [], active: 0 }]; S.activePane = 0; }
-  renderAll(); S.booted = true; window.__ok = true;
+  renderAll(); S.booted = true; window.__ok = true; if (window.__clear) window.__clear();
 }
 </script>
 </body>
