@@ -180,9 +180,12 @@ mark{background:rgba(255,200,0,.35);color:inherit;border-radius:2px}
 #toast{position:fixed;bottom:34px;left:50%;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:8px 16px;border-radius:8px;z-index:90;opacity:0;transition:opacity .2s;pointer-events:none}
 #toast.show{opacity:.95}
 @media(max-width:800px){#right{display:none}#left{width:220px}}
+#fatal{position:fixed;inset:0;z-index:100;background:var(--bg);color:var(--fg);padding:12vh 8vw;overflow:auto}
+#fatal h3{font-size:20px;margin:0 0 12px}#fatal p{max-width:560px;line-height:1.6;color:var(--fg2)}
 </style>
 </head>
 <body>
+<noscript><div style="position:fixed;inset:0;z-index:100;background:#1e1e22;color:#dcddde;padding:12vh 8vw;font:15px/1.6 sans-serif"><h3>EasyNotes needs JavaScript</h3><p>JavaScript is turned off or blocked for this page. Enable it for local files in your browser settings, or ask your IT team if the browser is managed.</p></div></noscript>
 <div id="app">
   <div id="ribbon"></div>
   <div id="left"></div>
@@ -284,6 +287,7 @@ class FSBackend {
   }
 }
 const idb = () => new Promise((res, rej) => { const r = indexedDB.open('easynotes', 1); r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+const withTimeout = (pr, ms, fb) => Promise.race([pr, new Promise(r => setTimeout(() => r(fb), ms))]);
 async function kvGet(k) { try { const db = await idb(); return await new Promise(res => { const q = db.transaction('kv').objectStore('kv').get(k); q.onsuccess = () => res(q.result); q.onerror = () => res(null); }); } catch { return null; } }
 async function kvSet(k, v) { try { const db = await idb(); return await new Promise(res => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = () => res(); t.onerror = () => res(); }); } catch {} }
 
@@ -1488,7 +1492,7 @@ async function openLocal() {
 async function pickFolder() {
   try {
     const dir = await window.showDirectoryPicker({ mode: 'readwrite' });
-    await kvSet('dir', dir); LS.set('easynotes:mode', 'fs');
+    await withTimeout(kvSet('dir', dir), 2000); LS.set('easynotes:mode', 'fs');
     S.panes = [{ tabs: [], active: 0 }]; S.activePane = 0;
     await loadVault(new FSBackend(dir)); renderAll();
     const first = [...S.notes.keys()].sort()[0]; if (first) openNote(first);
@@ -1524,11 +1528,12 @@ async function importFiles(files, folder = '') {
   renderAll(); toast(`Imported ${c} note${c === 1 ? '' : 's'}`);
 }
 function startScreen(savedDir) {
+  S.booted = true;
   return new Promise(res => {
     const { close, o } = overlay(h('div', { class: 'modal' }, h('h3', {}, 'Welcome to EasyNotes'), h('div', { class: 'pad' },
       h('p', {}, savedDir ? 'Pick up where you left off (press Enter):' : 'Choose where your notes live:'),
       savedDir ? h('button', { class: 'btn', onclick: async () => { try { if ((await savedDir.requestPermission({ mode: 'readwrite' })) !== 'granted') throw new Error('Permission denied'); close(); res(new FSBackend(savedDir)); } catch (e) { toast(e.message); } } }, `Reopen "${savedDir.name}"`) : null,
-      FS_OK ? h('button', { class: savedDir ? 'btn alt' : 'btn', onclick: async () => { try { const d = await window.showDirectoryPicker({ mode: 'readwrite' }); await kvSet('dir', d); close(); res(new FSBackend(d)); } catch (e) { if (e.name !== 'AbortError') toast(e.message); } } }, 'Open a folder on disk (real .md files)') : null,
+      FS_OK ? h('button', { class: savedDir ? 'btn alt' : 'btn', onclick: async () => { try { const d = await window.showDirectoryPicker({ mode: 'readwrite' }); await withTimeout(kvSet('dir', d), 2000); close(); res(new FSBackend(d)); } catch (e) { if (e.name !== 'AbortError') toast(e.message); } } }, 'Open a folder on disk (real .md files)') : null,
       h('button', { class: 'btn alt', onclick: () => { close(); res(new LocalBackend()); } }, 'Use browser storage'),
       !FS_OK ? h('p', { class: 'muted' }, 'Your browser has no folder-access API (use Chrome/Edge/Brave for real files).') : null,
       FS_OK ? h('p', { class: 'muted', style: 'padding:6px 0 0' }, 'Tip: in Chrome choose "Allow on every visit" when prompted and it will reopen with no clicks.') : null)));
@@ -1559,10 +1564,23 @@ window.addEventListener('beforeunload', e => { if ([...S.notes.values()].some(n 
 $('#importer').addEventListener('change', e => { importFiles([...e.target.files]); e.target.value = ''; });
 
 /* ============================ boot ============================ */
+function showFatal(detail) {
+  if ($('#fatal')) return;
+  document.body.append(h('div', { id: 'fatal' }, h('h3', {}, 'EasyNotes could not start'),
+    h('p', {}, String(detail || 'Unknown error')),
+    h('p', {}, 'Press F12 and open the Console tab to see details. This can happen when the browser, or your organisation, blocks JavaScript or storage for local files.'),
+    h('button', { class: 'btn', onclick: () => location.reload() }, 'Reload')));
+}
+window.addEventListener('error', e => { if (!S.booted) showFatal(e.message); });
+window.addEventListener('unhandledrejection', e => { if (!S.booted) showFatal(e.reason && e.reason.message || e.reason); });
 (async function boot() {
+  const watchdog = setTimeout(() => { if (!S.booted) showFatal('Startup is taking longer than expected.'); }, 6000);
+  try { await bootMain(); } catch (e) { showFatal(e && e.message || e); } finally { clearTimeout(watchdog); }
+})();
+async function bootMain() {
   const ui = loadUI(); document.documentElement.dataset.theme = S.theme;
   let backend = null; const mode = LS.get('easynotes:mode');
-  const saved = FS_OK ? await kvGet('dir') : null;
+  const saved = FS_OK ? await withTimeout(kvGet('dir'), 2000, null) : null;
   if (mode === 'fs' && saved) {
     try { if ((await saved.queryPermission({ mode: 'readwrite' })) === 'granted') backend = new FSBackend(saved); } catch {}
     if (!backend) backend = await startScreen(saved);
@@ -1576,8 +1594,8 @@ $('#importer').addEventListener('change', e => { importFiles([...e.target.files]
     S.activePane = ui.activePane || 0;
   }
   if (!S.panes.some(p => p.tabs.length)) { const first = S.notes.has('Welcome.md') ? 'Welcome.md' : [...S.notes.keys()].sort()[0]; S.panes = [{ tabs: first ? [{ type: 'note', path: first, mode: 'rich' }] : [], active: 0 }]; S.activePane = 0; }
-  renderAll();
-})();
+  renderAll(); S.booted = true;
+}
 </script>
 </body>
 </html>
