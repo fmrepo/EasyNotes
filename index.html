@@ -4,6 +4,33 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>EasyNotes</title>
+<script>
+/* Startup diagnostics: runs before the app so a failure shows a message, not a blank page */
+(function () {
+  function fail(detail) {
+    if (window.__ok || document.getElementById('fatal')) return;
+    function build() {
+      var d = document.createElement('div'); d.id = 'fatal';
+      d.style.cssText = 'position:fixed;inset:0;z-index:100;background:#1e1e22;color:#dcddde;padding:8vh 8vw;overflow:auto;font:14px/1.6 sans-serif';
+      d.innerHTML = '<h3 style="font-size:20px;margin:0 0 12px">EasyNotes could not start</h3><p style="color:#9a9ca3;max-width:640px">This can happen when the browser, or your organisation, blocks JavaScript or storage for local files. Please send a screenshot of this message.</p><pre id="fatalmsg" style="white-space:pre-wrap;background:#2a2a30;padding:12px;border-radius:8px;max-width:760px;font:12px/1.5 monospace"></pre><button onclick="location.reload()" style="padding:7px 14px;border:0;border-radius:6px;background:#a38bff;color:#fff;font:inherit;cursor:pointer">Reload</button>';
+      document.body.appendChild(d);
+      document.getElementById('fatalmsg').textContent = detail + '\n\nBrowser: ' + navigator.userAgent + '\nAddress: ' + location.protocol + '//' + (location.host || '(local file)');
+    }
+    if (document.body) build(); else document.addEventListener('DOMContentLoaded', build);
+  }
+  window.__fail = fail;
+  window.addEventListener('error', function (e) {
+    if (window.__ok || /ResizeObserver loop/.test(e.message || '')) return;
+    var loc = e.filename ? '\nAt: ' + e.filename.split('/').pop() + ' line ' + e.lineno + ', column ' + e.colno : '';
+    fail((e.message || 'Script error') + loc + (e.error && e.error.stack ? '\n\n' + String(e.error.stack).split('\n').slice(0, 6).join('\n') : ''));
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    if (window.__ok) return; var r = e.reason;
+    fail('Unhandled promise error: ' + (r && r.message || r) + (r && r.stack ? '\n\n' + String(r.stack).split('\n').slice(0, 6).join('\n') : ''));
+  });
+  setTimeout(function () { if (!window.__ok) fail('Startup is taking longer than expected (8 seconds).'); }, 8000);
+})();
+</script>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%237c5cff'/><path fill='%23fff' d='M20 16h26v8H28v4h12v8H28v4h18v8H20z'/></svg>">
 <style>
 :root{
@@ -1528,7 +1555,7 @@ async function importFiles(files, folder = '') {
   renderAll(); toast(`Imported ${c} note${c === 1 ? '' : 's'}`);
 }
 function startScreen(savedDir) {
-  S.booted = true;
+  S.booted = true; window.__ok = true;
   return new Promise(res => {
     const { close, o } = overlay(h('div', { class: 'modal' }, h('h3', {}, 'Welcome to EasyNotes'), h('div', { class: 'pad' },
       h('p', {}, savedDir ? 'Pick up where you left off (press Enter):' : 'Choose where your notes live:'),
@@ -1564,18 +1591,9 @@ window.addEventListener('beforeunload', e => { if ([...S.notes.values()].some(n 
 $('#importer').addEventListener('change', e => { importFiles([...e.target.files]); e.target.value = ''; });
 
 /* ============================ boot ============================ */
-function showFatal(detail) {
-  if ($('#fatal')) return;
-  document.body.append(h('div', { id: 'fatal' }, h('h3', {}, 'EasyNotes could not start'),
-    h('p', {}, String(detail || 'Unknown error')),
-    h('p', {}, 'Press F12 and open the Console tab to see details. This can happen when the browser, or your organisation, blocks JavaScript or storage for local files.'),
-    h('button', { class: 'btn', onclick: () => location.reload() }, 'Reload')));
-}
-window.addEventListener('error', e => { if (!S.booted) showFatal(e.message); });
-window.addEventListener('unhandledrejection', e => { if (!S.booted) showFatal(e.reason && e.reason.message || e.reason); });
+function showFatal(e) { if (window.__fail) window.__fail((e && e.message || String(e)) + (e && e.stack ? '\n\n' + String(e.stack).split('\n').slice(0, 6).join('\n') : '')); }
 (async function boot() {
-  const watchdog = setTimeout(() => { if (!S.booted) showFatal('Startup is taking longer than expected.'); }, 6000);
-  try { await bootMain(); } catch (e) { showFatal(e && e.message || e); } finally { clearTimeout(watchdog); }
+  try { await bootMain(); } catch (e) { showFatal(e); }
 })();
 async function bootMain() {
   const ui = loadUI(); document.documentElement.dataset.theme = S.theme;
@@ -1594,7 +1612,7 @@ async function bootMain() {
     S.activePane = ui.activePane || 0;
   }
   if (!S.panes.some(p => p.tabs.length)) { const first = S.notes.has('Welcome.md') ? 'Welcome.md' : [...S.notes.keys()].sort()[0]; S.panes = [{ tabs: first ? [{ type: 'note', path: first, mode: 'rich' }] : [], active: 0 }]; S.activePane = 0; }
-  renderAll(); S.booted = true;
+  renderAll(); S.booted = true; window.__ok = true;
 }
 </script>
 </body>
