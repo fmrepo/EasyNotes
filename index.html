@@ -458,7 +458,9 @@ function renderList(items) {
     if (!top || it.indent > top.indent) { html += `<${tag}>`; stack.push({ indent: it.indent, tag }); }
     else {
       while (stack.length > 1 && it.indent < stack[stack.length - 1].indent) { html += `</li></${stack.pop().tag}>`; }
-      html += '</li>';
+      const cur = stack[stack.length - 1];
+      if (cur.tag !== tag) { html += `</li></${cur.tag}><${tag}>`; stack[stack.length - 1] = { indent: it.indent, tag }; }   // a bullet after a numbered item (or the reverse) starts a new list
+      else html += '</li>';
     }
     if (it.task) html += `<li class="task${it.task === 'x' ? ' done' : ''}"><input type="checkbox" contenteditable="false" data-line="${it.line}"${it.task === 'x' ? ' checked' : ''}><span class="t">${inline(it.text)}</span>`;
     else html += `<li>${inline(it.text)}`;
@@ -858,9 +860,11 @@ function inlList(nodes) {
   return out;
 }
 const inl = node => inlList(node.childNodes);
-function listMd(el, depth) {
-  const lines = []; let n = 1; const ordered = el.tagName === 'OL'; const pre = '  '.repeat(depth);
+function listMd(el, prefix = '') {
+  /* Browsers nest an indented list either inside an <li> or directly inside the parent <ul>/<ol>; handle both. */
+  const lines = []; let n = 1; const ordered = el.tagName === 'OL'; let markerW = 2;
   for (const li of el.children) {
+    if (li.tagName === 'UL' || li.tagName === 'OL') { const sub = listMd(li, prefix + ' '.repeat(markerW)); if (sub) lines.push(sub); continue; }
     if (li.tagName !== 'LI') continue;
     const cb = [...li.children].find(c => c.tagName === 'INPUT');
     let text = ''; const subs = [];
@@ -868,9 +872,12 @@ function listMd(el, depth) {
       if (c.nodeType === 1 && (c.tagName === 'UL' || c.tagName === 'OL')) subs.push(c);
       else if (!(c.nodeType === 1 && c.tagName === 'INPUT')) text += inlList([c]);
     }
-    text = text.trim().split('\n').map(l => l.trim()).join('\n' + pre + '  ');
-    lines.push(pre + (ordered ? `${n++}. ` : '- ') + (cb ? (cb.checked ? '[x] ' : '[ ] ') : '') + text);
-    for (const sub of subs) lines.push(listMd(sub, depth + 1));
+    text = text.trim();
+    if (text || cb || !subs.length) {
+      const marker = ordered ? `${n++}. ` : '- '; markerW = marker.length;
+      lines.push(prefix + marker + (cb ? (cb.checked ? '[x] ' : '[ ] ') : '') + text.split('\n').map(l => l.trim()).join('\n' + prefix + ' '.repeat(markerW)));
+    }
+    for (const sub of subs) { const t = listMd(sub, prefix + ' '.repeat(markerW)); if (t) lines.push(t); }
   }
   return lines.join('\n');
 }
@@ -886,7 +893,7 @@ function blockMd(el) {
   const t = el.tagName;
   if (el.classList && el.classList.contains('embed')) return el.dataset.raw || '';
   if (/^H[1-6]$/.test(t)) return '#'.repeat(+t[1]) + ' ' + inl(el).replace(/\n/g, ' ').trim();
-  if (t === 'UL' || t === 'OL') return listMd(el, 0);
+  if (t === 'UL' || t === 'OL') return listMd(el);
   if (t === 'BLOCKQUOTE') return blocks(el).split('\n').map(l => l ? '> ' + l : '>').join('\n');
   if (t === 'PRE') { const code = el.querySelector('code'); const lang = code && (code.className.match(/lang-([\w-]+)/) || [])[1] || ''; return '```' + lang + '\n' + el.textContent.replace(/\n$/, '') + '\n```'; }
   if (t === 'HR') return '---';
@@ -985,6 +992,32 @@ function toggleTask(ed) {
   if (!li) return;
   if (li.classList.contains('task')) unTaskLi(li); else { const sp = makeTaskLi(li); if (sp) placeCaret(sp, true); }
 }
+/* Indent / outdent a task item ourselves: the browser's command leaves an empty copy behind and puts the caret in it. */
+function indentTask(ed, outdent) {
+  const sel = getSelection(); if (!sel.rangeCount) return false;
+  const li = closestIn(sel.anchorNode, 'li', ed); if (!li || !li.classList.contains('task')) return false;
+  const r0 = sel.getRangeAt(0), saved = { n: r0.startContainer, o: r0.startOffset }, list = li.parentElement, tag = list.tagName.toLowerCase();
+  const subOf = el => [...el.children].reverse().find(x => x.tagName === 'UL' || x.tagName === 'OL');
+  const following = () => { const out = []; for (let x = li.nextElementSibling; x; x = x.nextElementSibling) out.push(x); return out; };
+  if (!outdent) {
+    const prev = li.previousElementSibling; if (!prev) return true;            // first item: nothing to nest under
+    if (prev.tagName === 'UL' || prev.tagName === 'OL') prev.append(li);        // list nested directly in a list
+    else { let sub = subOf(prev); if (!sub) { sub = document.createElement(tag); prev.append(sub); } sub.append(li); }
+  } else {
+    const holder = list.parentElement;
+    if (holder && holder.tagName === 'LI') {
+      const rest = following(); holder.after(li);
+      if (rest.length) { let sub = subOf(li); if (!sub) { sub = document.createElement(tag); li.append(sub); } rest.forEach(x => sub.append(x)); }
+      if (!list.children.length) list.remove();
+    } else if (holder && (holder.tagName === 'UL' || holder.tagName === 'OL')) {
+      const rest = following(); list.after(li);
+      if (rest.length) { const sub = document.createElement(tag); li.after(sub); rest.forEach(x => sub.append(x)); }
+      if (!list.children.length) list.remove();
+    } else return true;                                                        // already at the top level
+  }
+  const r = document.createRange(); r.setStart(saved.n, saved.o); r.collapse(true); sel.removeAllRanges(); sel.addRange(r);
+  return true;
+}
 function fixTasks(ed) { ed.querySelectorAll('li.task').forEach(li => { if (![...li.children].some(c => c.tagName === 'INPUT')) { const sp = makeTaskLi(li); if (sp && li.contains(getSelection().anchorNode)) placeCaret(sp, false); } }); }
 function richShortcut(ed) {
   const sel = getSelection(); if (!sel.rangeCount || !sel.isCollapsed) return false;
@@ -1037,7 +1070,7 @@ function buildRich(n, t, sync) {
     B('S', 'Strikethrough', () => exec('strikeThrough'), 'text-decoration:line-through'), B('▇', 'Highlight', () => wrapSel('mark')), B('</>', 'Inline code', () => wrapSel('code')), sep(),
     B('H1', 'Heading 1', () => block('h1')), B('H2', 'Heading 2', () => block('h2')), B('H3', 'Heading 3', () => block('h3')), B('¶', 'Normal text', () => exec('formatBlock', '<p>')), sep(),
     B('•', 'Bullet list', () => exec('insertUnorderedList')), B('1.', 'Numbered list', () => exec('insertOrderedList')), B('☑', 'Task list', () => { ed.focus(); toggleTask(ed); doSync(); }),
-    B('⇥', 'Indent', () => exec('indent')), B('⇤', 'Outdent', () => exec('outdent')), sep(),
+    B('⇥', 'Indent', () => { ed.focus(); if (!indentTask(ed, false)) document.execCommand('indent'); fixTasks(ed); ensureTail(); doSync(); }), B('⇤', 'Outdent', () => { ed.focus(); if (!indentTask(ed, true)) document.execCommand('outdent'); fixTasks(ed); ensureTail(); doSync(); }), sep(),
     B('❝', 'Quote', () => block('blockquote')), B('{ }', 'Code block', () => block('pre')), B('―', 'Divider', () => exec('insertHorizontalRule')),
     B('▦', 'Insert table', async () => { const r = saveRange(); const v = await askText('Table size (rows x columns)', '3x3'); restore(r); const m = v && v.match(/^(\d+)\s*[x×,]\s*(\d+)$/i); if (!m) return; const R = Math.min(+m[1], 30), C = Math.min(+m[2], 12); const row = (tag) => '<tr>' + Array.from({ length: C }, () => `<${tag}>&nbsp;</${tag}>`).join('') + '</tr>'; document.execCommand('insertHTML', false, `<table><thead>${row('th')}</thead><tbody>${Array.from({ length: R - 1 }, () => row('td')).join('')}</tbody></table><p><br></p>`); doSync(); }), sep(),
     B('[[ ]]', 'Link to note', () => { const r = saveRange(); palette('Link to note…', q => { const res = [...S.notes.keys()].map(p => [p, fuzzy(q, noext(p))]).filter(x => x[1] >= 0).sort((a, b) => b[1] - a[1]).map(([p]) => ({ label: base(p), hint: p, run: () => { restore(r); const nm = S.idx.byBase.get(base(p).toLowerCase()) === p ? base(p) : noext(p); insertWiki(ed, nm); } })); return res; }); }),
@@ -1055,7 +1088,7 @@ function buildRich(n, t, sync) {
     if (e.key === 'Tab') {
       const cell = sel.rangeCount && closestIn(sel.anchorNode, 'td,th', ed);
       if (cell) { e.preventDefault(); const cells = [...cell.closest('table').querySelectorAll('td,th')]; const nx = cells[cells.indexOf(cell) + (e.shiftKey ? -1 : 1)]; if (nx) placeCaret(nx, true); return; }
-      if (li) { e.preventDefault(); document.execCommand(e.shiftKey ? 'outdent' : 'indent'); fixTasks(ed); doSync(); }
+      if (li) { e.preventDefault(); if (!indentTask(ed, e.shiftKey)) document.execCommand(e.shiftKey ? 'outdent' : 'indent'); fixTasks(ed); doSync(); }
       else { e.preventDefault(); document.execCommand('insertText', false, '  '); }
     } else if (e.key === 'Enter' && !e.shiftKey && li && li.classList.contains('task')) {
       const sp = [...li.children].find(c => c.classList.contains('t'));
